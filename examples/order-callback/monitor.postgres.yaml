@@ -1,0 +1,41 @@
+version: 1
+sources:
+  - id: orders-db
+    driver: postgres
+    dsn: {env: ORDER_DATABASE_DSN}
+    budget: {timeout: 5s, max_rows: 1000, max_bytes: 1048576}
+checks:
+  - id: order-callback
+    source: orders-db
+    mode: entity
+    interval: 15s
+    query: |
+      SELECT order_id, callback_state, retry_count, created_at, updated_at,
+             CAST(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - updated_at)) AS BIGINT) AS age_seconds
+      FROM callback_orders
+      WHERE updated_at >= :window_start OR callback_state IN ('WAITING_ACK','DEAD_LETTER')
+      ORDER BY updated_at, order_id
+    identity: [id]
+    fields:
+      id: {column: order_id, type: string, required: true}
+      state: {column: callback_state, type: string, required: true}
+      retries: {column: retry_count, type: int, required: true}
+      age_seconds: {column: age_seconds, type: int, required: true}
+      created: {column: created_at, type: timestamp, required: true}
+      updated: {column: updated_at, type: timestamp, required: true}
+    rules:
+      - id: callback-failed
+        trigger: fields.state == 'DEAD_LETTER'
+        recover: fields.state == 'DELIVERED'
+        confirmations: 1
+        recovery_confirmations: 2
+        severity: critical
+      - id: callback-timeout
+        trigger: fields.state == 'WAITING_ACK' && fields.age_seconds > 180
+        recover: fields.state == 'DELIVERED'
+        confirmations: 2
+        recovery_confirmations: 2
+        severity: warning
+    diagnosis_mode: rule_only
+    allow_model: false
+    runbook: 检查接收端、权限及重试队列，由业务负责人决定是否重试。

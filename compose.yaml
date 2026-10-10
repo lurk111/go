@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    environment:
+      POSTGRES_DB: bid_mon
+      POSTGRES_USER: monitor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run start.ps1 or start.sh to initialize}
+    volumes: [system_data:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U monitor -d bid_mon']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+  monitor:
+    image: ${BID_MON_IMAGE:-bid-mon:2.0.0-dev}
+    user: ${BID_MON_UID:-10001}:${BID_MON_GID:-10001}
+    environment:
+      GO_DATABASE_URL: postgres://monitor:${POSTGRES_PASSWORD}@postgres:5432/bid_mon?sslmode=disable
+      MON_ADMIN_TOKEN: ${MON_ADMIN_TOKEN:?Run start.ps1 or start.sh to initialize}
+      GO_MONITOR_CONFIG: /etc/bid-mon/monitor.json
+      MON_DIAGNOSIS_ENABLED: "true"
+      MON_MODEL_CONFIG_FILE: ${MON_MODEL_CONFIG_FILE:-}
+      MON_SECRET_KEY_FILE: /etc/bid-mon/master.key
+    volumes:
+      - ./deploy/phase2/config:/etc/bid-mon:ro
+    ports:
+      - ${BID_MON_BIND_ADDRESS:-127.0.0.1}:${BID_MON_HTTP_PORT:-18080}:8000
+    networks: [backend, access]
+    extra_hosts: [host.docker.internal:host-gateway]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, /bid-mon, health]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
+networks:
+  backend: {internal: true}
+  access: {}
+volumes:
+  system_data: {}

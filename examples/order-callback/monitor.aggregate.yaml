@@ -1,0 +1,26 @@
+version: 1
+sources:
+  - id: orders-db
+    driver: postgres
+    dsn: {env: ORDER_DATABASE_DSN}
+checks:
+  - id: callback-failure-total
+    source: orders-db
+    mode: aggregate
+    interval: 30s
+    query: |
+      SELECT 'callback-failures' AS metric, COUNT(*) AS failures
+      FROM callback_orders WHERE callback_state = 'DEAD_LETTER'
+    identity: [metric]
+    fields:
+      metric: {column: metric, type: string, required: true}
+      failures: {column: failures, type: int, required: true}
+    rules:
+      - id: failed-orders
+        trigger: fields.failures > 0
+        recover: fields.failures == 0
+        confirmations: 2
+        recovery_confirmations: 2
+    diagnosis_mode: rule_only
+    allow_model: false
+    runbook: 按失败订单数量检查接收端、认证和重试队列。

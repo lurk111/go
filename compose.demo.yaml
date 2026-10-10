@@ -1,0 +1,89 @@
+# Isolated synthetic business services, optional in normal deployments.
+services:
+  mysql:
+    image: mysql:8@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+    command: [--default-time-zone=+00:00]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: presales_lab
+      MYSQL_USER: lab_writer
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MONITOR_MYSQL_PASSWORD: ${MONITOR_MYSQL_PASSWORD}
+    volumes: [demo_mysql:/var/lib/mysql, ./deploy/mysql:/docker-entrypoint-initdb.d:ro]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD=$$MYSQL_PASSWORD mysql -ulab_writer -D presales_lab -e "SELECT 1 FROM lab_jobs LIMIT 1" >/dev/null 2>&1']
+      interval: 3s
+      timeout: 5s
+      retries: 40
+    restart: unless-stopped
+  evidence-init:
+    image: ${BID_MON_IMAGE:-bid-mon:2.0.0-dev}
+    user: "0:0"
+    command: [init-evidence, --client-uid, '${BID_MON_UID:-10001}', --client-gid, '${BID_MON_GID:-10001}']
+    volumes: [demo_client:/ssh-client, demo_target:/ssh-target, demo_evidence:/evidence]
+    network_mode: none
+    restart: "no"
+  ssh-target:
+    image: ${BID_MON_SSH_IMAGE:-bid-mon-go-ssh:2.0.0-dev}
+    networks: [backend]
+    environment:
+      BID_MON_HELPER_PROFILES_FILE: /etc/bid-mon-helper/profiles.json
+    volumes: [demo_target:/ssh-target:ro, demo_evidence:/evidence:ro, ./deploy/phase2/config/helper-profiles.json:/etc/bid-mon-helper/profiles.json:ro]
+    read_only: true
+    tmpfs: [/run, /tmp]
+    depends_on:
+      evidence-init: {condition: service_completed_successfully}
+    restart: unless-stopped
+  simulator:
+    image: ${BID_MON_LAB_IMAGE:-bid-mon-lab:2.0.0-dev}
+    networks: [backend]
+    environment:
+      LAB_DATABASE_URL: mysql+pymysql://lab_writer:${MYSQL_PASSWORD}@mysql:3306/presales_lab
+      MON_ADMIN_TOKEN: ${MON_ADMIN_TOKEN}
+      LAB_EVIDENCE_DIR: /evidence
+    command: [uvicorn, 'presales_monitor.lab:app', --host, 0.0.0.0, --port, '8000', --no-access-log]
+    volumes: [demo_evidence:/evidence]
+    depends_on:
+      mysql: {condition: service_healthy}
+      evidence-init: {condition: service_completed_successfully}
+    restart: unless-stopped
+  worker:
+    image: ${BID_MON_LAB_IMAGE:-bid-mon-lab:2.0.0-dev}
+    environment:
+      LAB_DATABASE_URL: mysql+pymysql://lab_writer:${MYSQL_PASSWORD}@mysql:3306/presales_lab
+      LAB_EVIDENCE_DIR: /evidence
+    command: [python, -m, presales_monitor.lab]
+    volumes: [demo_evidence:/evidence]
+    networks: [backend]
+    depends_on:
+      mysql: {condition: service_healthy}
+      evidence-init: {condition: service_completed_successfully}
+    restart: unless-stopped
+  notification-sink:
+    image: ${BID_MON_LAB_IMAGE:-bid-mon-lab:2.0.0-dev}
+    environment: {MON_ADMIN_TOKEN: '${MON_ADMIN_TOKEN}'}
+    command: [uvicorn, 'presales_monitor.sink:app', --host, 0.0.0.0, --port, '8000', --no-access-log]
+    volumes: [demo_sink:/data]
+    networks: [backend]
+    restart: unless-stopped
+  monitor:
+    environment:
+      GO_SOURCE_DSN: monitor_reader:${MONITOR_MYSQL_PASSWORD}@tcp(mysql:3306)/presales_lab?parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27&timeout=5s&readTimeout=10s&writeTimeout=10s
+      GO_MONITOR_CONFIG: /etc/bid-mon/demo.json
+      MON_SOURCE_NAME: presales-demo
+      MON_ENVIRONMENT: demo
+      MON_SINK_URL: http://notification-sink:8000/notifications
+      GO_SSH_ADDRESS: ssh-target:22
+      MON_EVIDENCE_CONFIG_FILE: /etc/bid-mon/evidence.json
+    volumes: [demo_client:/ssh-client:ro]
+    depends_on:
+      mysql: {condition: service_healthy}
+      ssh-target: {condition: service_started}
+      notification-sink: {condition: service_started}
+volumes:
+  demo_mysql: {}
+  demo_client: {}
+  demo_target: {}
+  demo_evidence: {}
+  demo_sink: {}

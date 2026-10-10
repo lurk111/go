@@ -1,0 +1,14 @@
+.git
+.env
+deploy/phase2/config
+tmp
+.venv
+.uv-cache
+__pycache__
+.pytest_cache
+.ruff_cache
+deploy/.env
+deploy/model.local.json
+artifacts
+web/node_modules
+components

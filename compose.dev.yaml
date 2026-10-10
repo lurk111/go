@@ -1,0 +1,4 @@
+# Developer-only override; ordinary releases use prebuilt images.
+services:
+  monitor:
+    build: {context: ., dockerfile: Dockerfile.go, target: runtime}

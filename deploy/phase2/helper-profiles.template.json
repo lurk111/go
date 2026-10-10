@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "order_logs",
+      "target_id": "demo_ssh",
+      "service_id": "order_callbacks",
+      "check_ids": ["order_callback", "order_failure_rate"],
+      "root": "/evidence",
+      "files": ["orders.jsonl", "orders.jsonl.1"],
+      "format": "jsonl",
+      "key_field": "order_id",
+      "time_field": "timestamp",
+      "max_bytes": 65536,
+      "max_line_bytes": 16384
+    }
+  ]
+}

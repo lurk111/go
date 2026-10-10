@@ -1,0 +1,9 @@
+# Does not read required credentials, so it can run before .env exists.
+services:
+  initializer:
+    image: ${BID_MON_IMAGE:-bid-mon:2.0.0-dev}
+    user: "0:0"
+    network_mode: none
+    working_dir: /workspace
+    volumes: [.:/workspace]
+    entrypoint: [/bid-mon]

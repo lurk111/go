@@ -1,0 +1,161 @@
+name: bid-mon-lab
+x-go-env: &go-env
+  GO_DATABASE_URL: postgres://monitor:${POSTGRES_PASSWORD:?run init_lab.py}@postgres:5432/presales_monitor?sslmode=disable
+  GO_SOURCE_DSN: monitor_reader:${MONITOR_MYSQL_PASSWORD:?run init_lab.py}@tcp(mysql:3306)/presales_lab?parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27&timeout=5s&readTimeout=10s&writeTimeout=10s
+  MON_ADMIN_TOKEN: ${MON_ADMIN_TOKEN:?run init_lab.py}
+  MON_POLL_SECONDS: ${MON_POLL_SECONDS:-15}
+  MON_QUEUE_SECONDS: ${MON_QUEUE_SECONDS:-180}
+  MON_STALE_SECONDS: ${MON_STALE_SECONDS:-900}
+  MON_RESULT_GRACE_SECONDS: ${MON_RESULT_GRACE_SECONDS:-30}
+  MON_DIAGNOSIS_TIMEOUT_SECONDS: ${MON_DIAGNOSIS_TIMEOUT_SECONDS:-120}
+  MON_DIAGNOSIS_ENABLED: ${MON_DIAGNOSIS_ENABLED:-true}
+
+x-lab: &lab
+  image: bid-mon-lab:0.1.0
+  pull_policy: never
+  networks: [lab]
+  restart: unless-stopped
+
+services:
+  mysql:
+    image: mysql:8@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+    command: ["--default-time-zone=+00:00"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: presales_lab
+      MYSQL_USER: lab_writer
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MONITOR_MYSQL_PASSWORD: ${MONITOR_MYSQL_PASSWORD}
+    volumes: [mysql_data:/var/lib/mysql, ./mysql:/docker-entrypoint-initdb.d:ro]
+    networks: [lab]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql -ulab_writer -D presales_lab -e 'SELECT 1 FROM lab_jobs LIMIT 1' >/dev/null 2>&1"]
+      interval: 5s
+      retries: 30
+    restart: unless-stopped
+  postgres:
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    environment:
+      POSTGRES_DB: presales_monitor
+      POSTGRES_USER: monitor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [lab]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitor -d presales_monitor"]
+      interval: 3s
+      retries: 20
+    restart: unless-stopped
+  evidence-init:
+    <<: *lab
+    build: {context: .., dockerfile: Dockerfile}
+    user: root
+    restart: "no"
+    command: ["python", "scripts/init_evidence.py"]
+    volumes: [ssh_client:/ssh-client, ssh_target:/ssh-target, evidence_data:/evidence]
+  ssh-target:
+    image: bid-mon-go-ssh:1.0.0
+    build: {context: .., dockerfile: Dockerfile.go, target: ssh-target}
+    networks: [lab]
+    volumes: [ssh_target:/ssh-target:ro, evidence_data:/evidence:ro]
+    read_only: true
+    tmpfs: [/run, /tmp]
+    depends_on:
+      evidence-init: {condition: service_completed_successfully}
+    restart: unless-stopped
+  monitor:
+    image: bid-mon-go:1.0.0
+    build: {context: .., dockerfile: Dockerfile.go, target: runtime}
+    environment:
+      <<: *go-env
+      MON_MODEL_CONFIG_FILE: ${MON_MODEL_CONFIG_FILE:-}
+    networks: [lab, access]
+    volumes: [ssh_client:/ssh-client:ro, ./model.local.json:/run/secrets/model.json:ro]
+    ports: ["127.0.0.1:18080:8000"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "/bid-mon", "health"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+    depends_on:
+      postgres: {condition: service_healthy}
+      mysql: {condition: service_healthy}
+      ssh-target: {condition: service_started}
+      notification-sink: {condition: service_started}
+    restart: unless-stopped
+  simulator:
+    <<: *lab
+    networks: [lab, access]
+    environment:
+      LAB_DATABASE_URL: mysql+pymysql://lab_writer:${MYSQL_PASSWORD}@mysql:3306/presales_lab
+      MON_ADMIN_TOKEN: ${MON_ADMIN_TOKEN}
+      LAB_EVIDENCE_DIR: /evidence
+    command: ["uvicorn", "presales_monitor.lab:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    volumes: [evidence_data:/evidence]
+    ports: ["127.0.0.1:18081:8000"]
+    depends_on:
+      mysql: {condition: service_healthy}
+      evidence-init: {condition: service_completed_successfully}
+  worker:
+    <<: *lab
+    environment:
+      LAB_DATABASE_URL: mysql+pymysql://lab_writer:${MYSQL_PASSWORD}@mysql:3306/presales_lab
+      LAB_EVIDENCE_DIR: /evidence
+    command: ["python", "-m", "presales_monitor.lab"]
+    volumes: [evidence_data:/evidence]
+    depends_on:
+      mysql: {condition: service_healthy}
+      evidence-init: {condition: service_completed_successfully}
+  notification-sink:
+    <<: *lab
+    networks: [lab, access]
+    environment: {MON_ADMIN_TOKEN: "${MON_ADMIN_TOKEN}"}
+    command: ["uvicorn", "presales_monitor.sink:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    ports: ["127.0.0.1:18082:8000"]
+    volumes: [sink_data:/data]
+  go-tests:
+    image: bid-mon-go-tests:1.0.0
+    build: {context: .., dockerfile: Dockerfile.go, target: test-runner}
+    profiles: [test]
+    networks: [lab]
+    environment:
+      <<: *go-env
+      RUN_GO_INTEGRATION: "1"
+      RUN_GO_SSH: "1"
+      GO_SOURCE_DSN: monitor_reader:${MONITOR_MYSQL_PASSWORD}@tcp(test-mysql:3306)/presales_lab?parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27&timeout=5s&readTimeout=10s&writeTimeout=10s
+      GO_LAB_DSN: lab_writer:${MYSQL_PASSWORD}@tcp(test-mysql:3306)/presales_lab?parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27
+    volumes: [ssh_client:/ssh-client:ro]
+    depends_on:
+      postgres: {condition: service_healthy}
+      test-mysql: {condition: service_healthy}
+      ssh-target: {condition: service_started}
+  test-mysql:
+    image: mysql:8@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+    profiles: [test]
+    command: ["--default-time-zone=+00:00"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: presales_lab
+      MYSQL_USER: lab_writer
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MONITOR_MYSQL_PASSWORD: ${MONITOR_MYSQL_PASSWORD}
+    volumes: [test_mysql_data:/var/lib/mysql, ./mysql:/docker-entrypoint-initdb.d:ro]
+    networks: [lab]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql -ulab_writer -D presales_lab -e 'SELECT 1 FROM lab_jobs LIMIT 1' >/dev/null 2>&1"]
+      interval: 3s
+      retries: 30
+networks:
+  lab: {internal: true}
+  access: {}
+volumes:
+  mysql_data:
+  postgres_data:
+  sink_data:
+  ssh_client:
+  ssh_target:
+  evidence_data:
+  test_mysql_data:

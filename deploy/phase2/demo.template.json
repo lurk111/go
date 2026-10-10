@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "monitor_presales": true,
+  "evidence_config_file": "/etc/bid-mon/evidence.json",
+  "sources": [
+    {"id": "orders", "driver": "mysql", "dsn": {"env": "GO_SOURCE_DSN"}, "budget": {"timeout": "5s", "max_rows": 1000, "max_bytes": 1048576}}
+  ],
+  "channels": [
+    {"id": "demo_receiver", "type": "local_sink", "url": "http://notification-sink:8000/notifications", "token_secret": {"env": "MON_ADMIN_TOKEN"}, "confirm": "code_zero"}
+  ],
+  "checks": [
+    {
+      "id": "order_callback", "source": "orders", "mode": "entity", "environment": "demo", "interval": "3s",
+      "query": "SELECT order_id, callback_state, retry_count, updated_at, TIMESTAMPDIFF(SECOND,updated_at,UTC_TIMESTAMP()) AS age_seconds FROM callback_orders WHERE updated_at >= :window_start AND updated_at <= :window_end ORDER BY updated_at,order_id",
+      "identity": ["id"],
+      "fields": {
+        "id": {"column": "order_id", "type": "string", "required": true},
+        "status": {"column": "callback_state", "type": "string", "required": true},
+        "retries": {"column": "retry_count", "type": "int", "required": true},
+        "updated": {"column": "updated_at", "type": "timestamp", "required": true},
+        "age_seconds": {"column": "age_seconds", "type": "int", "required": true}
+      },
+      "rules": [
+        {"id": "callback_dead_letter", "trigger": "fields.status == 'DEAD_LETTER'", "recover": "fields.status == 'DELIVERED'", "confirmations": 2, "recovery_confirmations": 2, "severity": "critical", "summary": "订单回调重试耗尽"},
+        {"id": "callback_timeout", "trigger": "fields.status == 'WAITING_ACK' && fields.age_seconds >= 300", "recover": "fields.status == 'DELIVERED'", "confirmations": 2, "recovery_confirmations": 2, "summary": "订单回调等待超时"}
+      ],
+      "diagnosis_mode": "rule_only", "allow_model": false, "evidence_profile": "order_logs",
+      "diagnostic_rules": [
+        {"id": "downstream_timeout", "pattern": "callback_timeout", "category": "downstream_timeout", "summary": "日志记录下游回调超时", "actions": ["检查下游接口可用性与响应耗时", "确认业务幂等策略后人工决定是否重试"]},
+        {"id": "downstream_rejected", "pattern": "callback_rejected", "category": "downstream_rejected", "summary": "日志记录下游拒绝回调", "actions": ["核对下游鉴权、请求格式和拒绝状态码", "保留失败记录并人工确认处理方式"]}
+      ],
+      "notification_routes": ["demo_receiver"],
+      "runbook": "先检查订单回调日志及下游接口状态，再评估人工重试。实验故意制造的失败可填写原因关闭；关闭不代表业务已恢复。"
+    },
+    {
+      "id": "order_failure_rate", "source": "orders", "mode": "aggregate", "environment": "demo", "interval": "3s",
+      "query": "SELECT COUNT(*) AS failed_count FROM callback_orders WHERE callback_state='DEAD_LETTER'",
+      "fields": {"count": {"column": "failed_count", "type": "int", "required": true}},
+      "rules": [{"id": "dead_letter_backlog", "trigger": "fields.count >= 3", "recover": "fields.count == 0", "confirmations": 2, "recovery_confirmations": 2, "summary": "订单回调失败积压"}],
+      "notification_routes": ["demo_receiver"], "diagnosis_mode": "rule_only", "allow_model": false,
+      "runbook": "查看实体检查定位各订单失败原因，确认后分别处理。聚合数量回到零后确认恢复。"
+    }
+  ]
+}

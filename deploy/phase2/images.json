@@ -1,0 +1,11 @@
+{
+  "version": "2.0.0-dev",
+  "published": false,
+  "runtime": "bid-mon:2.0.0-dev",
+  "demo": "bid-mon-lab:2.0.0-dev",
+  "ssh_demo": "bid-mon-go-ssh:2.0.0-dev",
+  "platforms_declared": ["linux/amd64", "linux/arm64"],
+  "platforms_verified": [],
+  "runtime_platforms_verified": ["linux/amd64"],
+  "note": "Development images have not been published. Build from source or replace with real fixed release image references."
+}
